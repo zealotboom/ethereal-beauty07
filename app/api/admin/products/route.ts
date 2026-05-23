@@ -1,0 +1,87 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import { z } from "zod";
+import { createClient, hasSupabaseEnv } from "@/lib/supabase-server";
+
+const categories = ["tops", "bottoms", "dresses", "outerwear", "accessories"] as const;
+
+const productSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  description: z.string().min(10, "Description must be at least 10 characters"),
+  price: z.number().positive("Price must be positive"),
+  sale_price: z.number().positive().optional().nullable(),
+  category: z.enum(categories),
+  images: z.array(z.string()).min(1, "At least 1 image required"),
+  sizes: z.array(z.string()).min(1, "Select at least 1 size"),
+  colors: z.array(z.string()).min(1, "Add at least 1 color"),
+  stock: z.number().int().min(0),
+  tags: z.array(z.string()).optional(),
+  is_active: z.boolean().default(true)
+});
+
+async function requireAdmin() {
+  if (!hasSupabaseEnv() || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    return { error: NextResponse.json({ error: "Supabase admin env is not configured." }, { status: 500 }) };
+  }
+
+  const authClient = createClient();
+  const { data: { user }, error } = await authClient.auth.getUser();
+  if (error || !user) return { error: NextResponse.json({ error: "Unauthorized" }, { status: 401 }) };
+
+  const adminClient = createSupabaseClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+    { auth: { persistSession: false } }
+  );
+
+  const { data: profile } = await adminClient.from("profiles").select("role").eq("id", user.id).maybeSingle();
+  if (profile?.role !== "admin") return { error: NextResponse.json({ error: "Forbidden" }, { status: 403 }) };
+
+  return { adminClient };
+}
+
+export async function GET(req: NextRequest) {
+  const guard = await requireAdmin();
+  if ("error" in guard) return guard.error;
+
+  const params = req.nextUrl.searchParams;
+  const page = Math.max(1, Number(params.get("page") ?? 1));
+  const limit = Math.min(50, Math.max(1, Number(params.get("limit") ?? 10)));
+  const category = params.get("category") ?? "all";
+  const status = params.get("status") ?? "all";
+  const search = params.get("search") ?? "";
+  const sort = params.get("sort") ?? "newest";
+  const from = (page - 1) * limit;
+  const to = from + limit - 1;
+
+  let query = guard.adminClient.from("products").select("*", { count: "exact" });
+  if (category !== "all") query = query.eq("category", category);
+  if (status === "active") query = query.eq("is_active", true);
+  if (status === "inactive") query = query.eq("is_active", false);
+  if (search.trim()) query = query.ilike("name", `%${search.trim()}%`);
+
+  if (sort === "oldest") query = query.order("created_at", { ascending: true });
+  else if (sort === "price_high") query = query.order("price", { ascending: false });
+  else if (sort === "price_low") query = query.order("price", { ascending: true });
+  else if (sort === "most_stock") query = query.order("stock", { ascending: false });
+  else if (sort === "least_stock") query = query.order("stock", { ascending: true });
+  else query = query.order("created_at", { ascending: false });
+
+  const { data, error, count } = await query.range(from, to);
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  return NextResponse.json({ products: data ?? [], total: count ?? 0 });
+}
+
+export async function POST(req: NextRequest) {
+  const guard = await requireAdmin();
+  if ("error" in guard) return guard.error;
+
+  const parsed = productSchema.safeParse(await req.json());
+  if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 422 });
+
+  const { data, error } = await guard.adminClient.from("products").insert(parsed.data).select("*").single();
+  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+
+  return NextResponse.json(data);
+}
