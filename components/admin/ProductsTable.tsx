@@ -50,6 +50,7 @@ export default function ProductsTable({
   onFilters: (filters: ProductFilters) => void;
   onAdd: () => void;
   onEdit: (product: AdminProduct) => void;
+  onView?: (product: AdminProduct) => void;
   onDelete: (product: AdminProduct) => void;
   onRefresh: () => void;
   toast: (type: "success" | "error" | "warning", message: string) => void;
